@@ -1,0 +1,14 @@
+.gradle/
+.idea/
+local.properties
+**/build/
+*.apk
+*.aab
+*.keystore
+*.jks
+server/private/config.php
+captures/
+.DS_Store
+Thumbs.db
+
+
