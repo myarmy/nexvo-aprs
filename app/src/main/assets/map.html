@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    html,body,#map{height:100%;margin:0;background:#151819}
+    .leaflet-control-attribution{font-size:9px}
+    .aprs-marker{border:2px solid #fff;border-radius:50%;width:22px;height:22px;
+      background:#39d98a;box-shadow:0 0 0 4px rgba(57,217,138,.25)}
+    .aprs-marker.self{background:#ffffff;box-shadow:0 0 0 4px rgba(57,217,138,.40)}
+    .aprs-marker.dmr{background:#f5a623;box-shadow:0 0 0 4px rgba(245,166,35,.30)}
+    .aprs-marker.stale{opacity:.45}
+    .label{background:#24282b;color:#fff;border:1px solid #39d98a;border-radius:4px;
+      padding:3px 6px;font:bold 12px sans-serif;white-space:nowrap}
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+  const map=L.map('map',{zoomControl:true}).setView([41.0082,28.9784],10);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    maxZoom:19,attribution:'© OpenStreetMap'
+  }).addTo(map);
+  const markers={};
+  let followMode='MANUAL',showAprs=true,showDmr=true,maxAgeMin=60,maxDistanceKm=250,selfPosition=null,lastAutoCenter=0,didInitialSelfCenter=false;
+  function stableCenter(lat,lng,zoom){const now=Date.now(),target=L.latLng(lat,lng);if(now-lastAutoCenter<3000&&map.getCenter().distanceTo(target)<150)return;lastAutoCenter=now;map.setView(target,zoom||12,{animate:false});}
+  function distanceKm(a,b){const r=6371,dLat=(b[0]-a[0])*Math.PI/180,dLon=(b[1]-a[1])*Math.PI/180;const x=Math.sin(dLat/2)**2+Math.cos(a[0]*Math.PI/180)*Math.cos(b[0]*Math.PI/180)*Math.sin(dLon/2)**2;return 2*r*Math.asin(Math.sqrt(x));}
+  function applyFilters(){const now=Date.now();Object.values(markers).forEach(e=>{const age=(now-e.time)/60000;const layerOk=e.type==='DMR'?showDmr:showAprs;const rangeOk=!selfPosition||e.isSelf||distanceKm(selfPosition,[e.lat,e.lng])<=maxDistanceKm;const visible=e.pinned||(layerOk&&rangeOk&&age<=maxAgeMin);if(visible&&!map.hasLayer(e.marker))e.marker.addTo(map);if(!visible&&map.hasLayer(e.marker))map.removeLayer(e.marker);});}
+  function updateStation(name,lat,lng,isSelf,detail,type){
+    if(!Number.isFinite(lat)||!Number.isFinite(lng))return;
+    type=type||'APRS'; if(isSelf){selfPosition=[lat,lng];if(!didInitialSelfCenter){didInitialSelfCenter=true;stableCenter(lat,lng,12);}}
+    if(markers[name]){const e=markers[name];const moved=e.marker.getLatLng().distanceTo([lat,lng])>5;e.lat=lat;e.lng=lng;e.time=Date.now();e.type=type;if(moved)e.marker.setLatLng([lat,lng]);e.marker.setPopupContent(detail||name);applyFilters();if((followMode==='SELF'&&isSelf)||(followMode==='DMR'&&type==='DMR'))stableCenter(lat,lng,12);return;}
+    const icon=L.divIcon({className:'',html:
+      '<div class="aprs-marker '+(isSelf?'self':(type==='DMR'?'dmr':''))+'"></div><div class="label">'+name+'</div>',
+      iconSize:[80,42],iconAnchor:[11,11]});
+    const marker=L.marker([lat,lng],{icon}).addTo(map);
+    marker.bindPopup(detail||name);
+    marker.bindTooltip(detail||name,{direction:'top',offset:[0,-12]});
+    marker.on('click',()=>{Android.onStationSelected(name);if(followMode==='SELECTED')map.setView([lat,lng],13)});
+    markers[name]={marker,type,time:Date.now(),lat,lng,isSelf,pinned:false};applyFilters();
+    if((followMode==='SELF'&&isSelf)||(followMode==='DMR'&&type==='DMR'))stableCenter(lat,lng,12);
+  }
+  function centerMap(lat,lng,zoom){stableCenter(lat,lng,zoom||12)}
+  function setFollowMode(mode){followMode=mode||'MANUAL'}
+  function setLayers(aprs,dmr){showAprs=aprs;showDmr=dmr;applyFilters()}
+  function setFilters(distance,age){maxDistanceKm=distance||250;maxAgeMin=age||60;applyFilters()}
+  function pinStation(name,center){const e=markers[name];if(!e)return;e.pinned=true;applyFilters();e.marker.openPopup();if(center)stableCenter(e.lat,e.lng,13)}
+  map.on('dragstart',()=>{if(followMode!=='MANUAL'){followMode='MANUAL';Android.onManualMap()}});
+  setInterval(applyFilters,30000);
+</script>
+</body>
+</html>
