@@ -6,6 +6,7 @@ import android.app.KeyguardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.location.Location;
@@ -16,8 +17,16 @@ import android.net.NetworkInfo;
 import android.os.Bundle;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
+import android.webkit.WebChromeClient;
+import android.webkit.CookieManager;
+import android.webkit.WebSettings;
+import android.webkit.WebStorage;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -26,8 +35,12 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.Iterator;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.Locale;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /* JADX INFO: loaded from: classes3.dex */
 public final class MainActivity extends Activity {
@@ -38,6 +51,7 @@ public final class MainActivity extends Activity {
     private boolean compact;
     private String dmrId;
     private boolean home;
+    private boolean mainMenuVisible;
     private TextView ledCall;
     private TextView ledRange;
     private WebMapPanel map;
@@ -54,11 +68,18 @@ public final class MainActivity extends Activity {
     private boolean reconnectPending;
     private boolean destroyed;
     private boolean tablet;
+    private boolean denseUi;
     private String talkGroup;
     private String selectedStationName = "";
     private double selectedStationLat = Double.NaN;
     private double selectedStationLng = Double.NaN;
     private final ArrayList<TalkerEntry> talkerHistory = new ArrayList<>();
+    private WebView tgAudioWebView;
+    private Button tgListenButton;
+    private boolean tgListening;
+    private boolean tgKeepAliveScheduled;
+    private final HashMap<String, AprsPacketParser.Packet> pendingAprsPackets = new HashMap<>();
+    private boolean aprsUiFlushScheduled;
 
     /* JADX INFO: renamed from: BG */
     private static final int f15BG = Color.rgb(21, 24, 25);
@@ -85,7 +106,8 @@ public final class MainActivity extends Activity {
         int w = getResources().getConfiguration().screenWidthDp;
         int h = getResources().getConfiguration().screenHeightDp;
         this.compact = Math.min(w, h) <= 360 || h <= 320;
-        this.tablet = w >= 700;
+        this.tablet = w >= 600;
+        this.denseUi = this.compact || h <= 600;
         if (this.callsign.isEmpty()) {
             showSetup();
         } else {
@@ -98,7 +120,16 @@ public final class MainActivity extends Activity {
         this.home = false;
         LinearLayout body = column();
         body.setPadding(m11dp(20), m11dp(18), m11dp(20), m11dp(24));
-        body.addView(title("TR APRS", 30));
+        body.addView(title("Nexvo APRS", 30));
+        if (!this.callsign.isEmpty()) {
+            Button back = action("‹ GERİ • ANA MENÜ", PANEL_2);
+            back.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View view) {
+                    MainActivity.this.showMainMenu();
+                }
+            });
+            body.addView(back);
+        }
         body.addView(info("İLK KURULUM • ANDROID 7+", GREEN));
         final EditText call = field("Çağrı işareti (TA1ABC-9)", false);
         final EditText dmr = field("DMR ID (7 haneli)", false);
@@ -192,6 +223,15 @@ public final class MainActivity extends Activity {
             setupStatus.setTextColor(GREEN);
             toast("Profil ve APRS anahtarları kaydedildi.");
             showDashboard();
+            if (!this.dmrId.isEmpty() && !this.secureStore.readNexvoToken().isEmpty()
+                    && !this.secureStore.readAprsPasscode().isEmpty()) {
+                this.nexvo.registerProfile(this.secureStore.readNexvoToken(), this.callsign,
+                        this.secureStore.readAprsPasscode(), this.dmrId, this.callsign,
+                        this.talkGroup, true, new NexvoApiClient.Callback<JSONObject>() {
+                    public void onSuccess(JSONObject ignored) { }
+                    public void onError(String ignored) { }
+                });
+            }
         } catch (Exception e) {
             setupStatus.setText("KAYIT HATASI: " + (e.getMessage() == null ? "Cihaz anahtar deposu kullanılamıyor." : e.getMessage()));
             setupStatus.setTextColor(WARN);
@@ -202,6 +242,7 @@ public final class MainActivity extends Activity {
     /* JADX INFO: Access modifiers changed from: private */
     public void showDashboard() {
         this.home = true;
+        this.mainMenuVisible = false;
         LinearLayout root = column();
         root.addView(radioHeader());
         if (this.compact) {
@@ -216,6 +257,7 @@ public final class MainActivity extends Activity {
             center.addView(createMap(), verticalWeight(1));
             this.selectedCard = stationCard();
             center.addView(this.selectedCard);
+            addTgListenControl(center);
             root.addView(center, verticalWeight(1));
         }
         root.addView(bottomBar());
@@ -228,7 +270,7 @@ public final class MainActivity extends Activity {
         wrap.setBackgroundColor(f15BG);
         LinearLayout status = row();
         status.setGravity(16);
-        status.setPadding(m11dp(10), m11dp(6), m11dp(8), m11dp(4));
+        status.setPadding(m11dp(8), m11dp(this.denseUi ? 2 : 4), m11dp(6), m11dp(2));
         status.addView(text("SİNYAL  ▂▄▆█", this.compact ? 10 : 12, GREEN, true), weight(1));
         this.rxState = text("GPS ●  APRS ●", this.compact ? 9 : 11, GREEN, true);
         status.addView(this.rxState);
@@ -245,15 +287,15 @@ public final class MainActivity extends Activity {
         Location currentLocation = getBestLastLocation();
         String gpsQuality = currentLocation == null ? "GPS YOK" : "GPS ±" + Math.round(currentLocation.hasAccuracy() ? currentLocation.getAccuracy() : 0) + "m";
         this.signalPanel = text(gpsQuality + "   NET ◌   RX 0   TX —", this.compact ? 9 : 11, TEXT, true);
-        this.signalPanel.setPadding(m11dp(10), m11dp(3), m11dp(10), m11dp(5));
+        this.signalPanel.setPadding(m11dp(8), m11dp(2), m11dp(8), m11dp(this.denseUi ? 2 : 4));
         this.signalPanel.setBackgroundColor(PANEL);
         wrap.addView(this.signalPanel);
         LinearLayout callRow = row();
         callRow.setGravity(16);
-        callRow.setPadding(m11dp(12), m11dp(2), m11dp(8), m11dp(3));
+        callRow.setPadding(m11dp(8), m11dp(1), m11dp(6), m11dp(1));
         LinearLayout leds = column();
-        this.ledCall = led(this.callsign.isEmpty() ? "N0CALL-9" : this.callsign, this.compact ? 24 : 34);
-        this.ledRange = led("--.- KM   ---°", this.compact ? 18 : 25);
+        this.ledCall = led(this.callsign.isEmpty() ? "N0CALL-9" : this.callsign, this.compact ? 22 : (this.denseUi ? 26 : 30));
+        this.ledRange = led("--.- KM   ---°", this.compact ? 16 : (this.denseUi ? 18 : 22));
         leds.addView(this.ledCall);
         leds.addView(this.ledRange);
         callRow.addView(leds, weight(1));
@@ -282,7 +324,8 @@ public final class MainActivity extends Activity {
         wrap.addView(metrics);
         this.activeTalker = text("TG " + this.talkGroup + " • AKTİF KONUŞMACI BEKLENİYOR", this.compact ? 9 : 11, MUTED, true);
         this.activeTalker.setGravity(17);
-        this.activeTalker.setPadding(m11dp(6), m11dp(5), m11dp(6), m11dp(5));
+        this.activeTalker.setPadding(m11dp(5), m11dp(this.denseUi ? 2 : 4), m11dp(5), m11dp(this.denseUi ? 2 : 4));
+        this.activeTalker.setMaxLines(this.denseUi ? 3 : 4);
         this.activeTalker.setBackgroundColor(PANEL_2);
         this.activeTalker.setOnClickListener(new View.OnClickListener() { // from class: tr.aprs.app.MainActivity$$ExternalSyntheticLambda35
             @Override // android.view.View.OnClickListener
@@ -356,6 +399,7 @@ public final class MainActivity extends Activity {
         this.selectedCard.setBackground(round(PANEL, GREEN, 1, 8));
         this.selectedCard.setPadding(m11dp(8), m11dp(7), m11dp(8), m11dp(7));
         body.addView(this.selectedCard);
+        addTgListenControl(body);
         return body;
     }
 
@@ -386,7 +430,117 @@ public final class MainActivity extends Activity {
             }
         });
         p.addView(search);
+        addTgListenControl(p);
         return p;
+    }
+
+    private void addTgListenControl(LinearLayout host) {
+        this.tgListenButton = action("▶ TG " + this.talkGroup + " DİNLE", PANEL_2);
+        if (this.tgListening) {
+            this.tgListenButton.setText("■ TG " + this.talkGroup + " DİNLEMEYİ DURDUR");
+            this.tgListenButton.setCompoundDrawablesWithIntrinsicBounds(android.R.drawable.ic_media_pause, 0, 0, 0);
+        } else {
+            this.tgListenButton.setCompoundDrawablesWithIntrinsicBounds(android.R.drawable.ic_media_play, 0, 0, 0);
+        }
+        this.tgListenButton.setCompoundDrawablePadding(m11dp(5));
+        this.tgListenButton.setOnClickListener(v -> toggleTgListening(host));
+        host.addView(this.tgListenButton);
+        if (this.tgListening && this.tgAudioWebView != null) {
+            if (this.tgAudioWebView.getParent() instanceof ViewGroup) {
+                ((ViewGroup) this.tgAudioWebView.getParent()).removeView(this.tgAudioWebView);
+            }
+            host.addView(this.tgAudioWebView, new LinearLayout.LayoutParams(2, 2));
+            this.tgAudioWebView.onResume();
+            this.tgAudioWebView.resumeTimers();
+        }
+    }
+
+    private void toggleTgListening(LinearLayout host) {
+        if (this.tgListening) {
+            stopTgListening();
+            toast("TG " + this.talkGroup + " dinleme durduruldu.");
+            return;
+        }
+        this.tgListening = true;
+        this.tgKeepAliveScheduled = false;
+        this.tgListenButton.setText("■ TG " + this.talkGroup + " DİNLEMEYİ DURDUR");
+        this.tgListenButton.setCompoundDrawablesWithIntrinsicBounds(android.R.drawable.ic_media_pause, 0, 0, 0);
+        WebView audio = new WebView(this);
+        this.tgAudioWebView = audio;
+        WebSettings settings = audio.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+        audio.setWebChromeClient(new WebChromeClient());
+        audio.setBackgroundColor(Color.TRANSPARENT);
+        audio.setFocusable(false);
+        audio.setWebViewClient(new WebViewClient() {
+            @Override public void onPageFinished(WebView view, String url) {
+                if (url == null || !url.startsWith("https://hose.brandmeister.network")) return;
+                String script = "(function(){" +
+                        "window.__nexvoAutoPlay=true;" +
+                        "var buttons=[].slice.call(document.querySelectorAll('button'));" +
+                        "var player=buttons.find(function(b){return (b.getAttribute('aria-label')||b.innerText||'').trim()==='Player';});" +
+                        "if(player&&!player.getAttribute('data-nexvo-opened')){player.setAttribute('data-nexvo-opened','1');player.click();}" +
+                        "setTimeout(function(){var all=[].slice.call(document.querySelectorAll('button'));var start=all.find(function(b){return (b.getAttribute('aria-label')||'').indexOf('Start player')>=0;});if(start&&!start.disabled)start.click();},900);" +
+                        "return 'ready';})()";
+                view.evaluateJavascript(script, null);
+                // Hoseline is client-rendered. Keep exactly one retry loop alive;
+                // page reloads must not create overlapping player loops.
+                if (!MainActivity.this.tgKeepAliveScheduled) {
+                    MainActivity.this.tgKeepAliveScheduled = true;
+                    view.postDelayed(() -> keepHoselineAlive(view), 1500L);
+                }
+            }
+        });
+        audio.setAlpha(0.01f);
+        host.addView(audio, new LinearLayout.LayoutParams(2, 2));
+        audio.onResume();
+        audio.resumeTimers();
+        audio.loadUrl("https://hose.brandmeister.network/?subscribe=" + this.talkGroup);
+        toast("TG " + this.talkGroup + " ana ekranda dinleniyor. Trafik varsa ses otomatik gelir.");
+    }
+
+    private void startEmbeddedHoselineAudio(WebView view) {
+        if (!this.tgListening || view != this.tgAudioWebView) return;
+        String tg = this.talkGroup.replace("'", "");
+        String js = "(function(){" +
+                "var input=document.querySelector('input[aria-label=Talkgroup]');" +
+                "if(!input){var bs=document.querySelectorAll('button');for(var i=0;i<bs.length;i++){if((bs[i].innerText||'').trim().toUpperCase()==='PLAYER'){bs[i].click();break;}}return;}" +
+                "var selected=false,buttons=document.querySelectorAll('button');for(var b=0;b<buttons.length;b++){if((buttons[b].innerText||'').trim()==='" + tg + "'){selected=true;break;}}" +
+                "if(!selected&&input.value!=='" + tg + "'){var set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;set.call(input,'" + tg + "');input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));}" +
+                "var opts=document.querySelectorAll('[role=option]');for(var o=0;o<opts.length;o++){var tx=(opts[o].innerText||'').trim();if(tx==='" + tg + "'||tx.endsWith('(" + tg + ")')){opts[o].click();break;}}" +
+                "var start=document.querySelector('button[aria-label=\"Start player\"]');if(start&&!start.disabled)start.click();" +
+                "var a=document.querySelectorAll('audio,video');for(var j=0;j<a.length;j++){a[j].muted=false;a[j].volume=1;try{a[j].play();}catch(e){}}})()";
+        view.evaluateJavascript(js, null);
+    }
+
+    private void keepHoselineAlive(WebView view) {
+        if (!this.tgListening || view != this.tgAudioWebView) return;
+        startEmbeddedHoselineAudio(view);
+        view.postDelayed(() -> keepHoselineAlive(view), 5000L);
+    }
+
+    private void stopTgListening() {
+        this.tgListening = false;
+        this.tgKeepAliveScheduled = false;
+        if (this.tgAudioWebView != null) {
+            this.tgAudioWebView.evaluateJavascript("(function(){window.__nexvoAutoPlay=false;document.querySelectorAll('audio,video').forEach(function(a){try{a.pause();a.removeAttribute('src');a.load();}catch(e){}});var b=[].slice.call(document.querySelectorAll('button')).find(function(x){return (x.getAttribute('aria-label')||'').indexOf('Stop player')>=0;});if(b)b.click();})()", null);
+            this.tgAudioWebView.stopLoading();
+            if (this.tgAudioWebView.getParent() instanceof ViewGroup) {
+                ((ViewGroup) this.tgAudioWebView.getParent()).removeView(this.tgAudioWebView);
+            }
+            this.tgAudioWebView.onPause();
+            this.tgAudioWebView.pauseTimers();
+            this.tgAudioWebView.removeAllViews();
+            this.tgAudioWebView.destroy();
+            this.tgAudioWebView = null;
+        }
+        if (this.tgListenButton != null) {
+            this.tgListenButton.setText("▶ TG " + this.talkGroup + " DİNLE");
+            this.tgListenButton.setCompoundDrawablesWithIntrinsicBounds(android.R.drawable.ic_media_play, 0, 0, 0);
+        }
     }
 
     /* JADX INFO: Access modifiers changed from: private */
@@ -429,19 +583,28 @@ public final class MainActivity extends Activity {
 
     private View bottomBar() {
         LinearLayout bar = row();
-        bar.setPadding(m11dp(4), m11dp(4), m11dp(4), m11dp(5));
+        bar.setPadding(m11dp(3), m11dp(2), m11dp(3), m11dp(6));
         bar.setBackgroundColor(PANEL);
         String[] items = this.compact ? new String[]{"MENÜ", "ARA", "MESAJ", "BEACON"} : new String[]{"HARİTA", "ARA", "MESAJ", "BAĞLANTI", "BEACON"};
+        int[] icons = this.compact
+                ? new int[]{android.R.drawable.ic_menu_more, android.R.drawable.ic_menu_search, android.R.drawable.ic_dialog_email, android.R.drawable.presence_online}
+                : new int[]{android.R.drawable.ic_menu_mapmode, android.R.drawable.ic_menu_search, android.R.drawable.ic_dialog_email, android.R.drawable.ic_menu_manage, android.R.drawable.presence_online};
+        int iconIndex = 0;
         for (String item : items) {
             Button b = action(item, PANEL);
-            b.setTextSize(this.compact ? 10.0f : 11.0f);
+            b.setTextSize(this.compact ? 8.0f : 9.0f);
+            android.graphics.drawable.Drawable icon = getResources().getDrawable(icons[iconIndex++]);
+            icon.setBounds(0, 0, m11dp(this.compact ? 16 : 18), m11dp(this.compact ? 16 : 18));
+            b.setCompoundDrawables(null, icon, null, null);
+            b.setCompoundDrawablePadding(0);
+            b.setPadding(0, 0, 0, 0);
             b.setOnClickListener(new View.OnClickListener() { // from class: tr.aprs.app.MainActivity$$ExternalSyntheticLambda36
                 @Override // android.view.View.OnClickListener
                 public final void onClick(View view) {
                     MainActivity.this.lambda$bottomBar$9(view);
                 }
             });
-            bar.addView(b, new LinearLayout.LayoutParams(0, m11dp(this.compact ? 48 : 52), 1.0f));
+            bar.addView(b, new LinearLayout.LayoutParams(0, m11dp(38), 1.0f));
         }
         return bar;
     }
@@ -475,6 +638,7 @@ public final class MainActivity extends Activity {
 
     private void showMainMenu() {
         this.home = false;
+        this.mainMenuVisible = true;
         LinearLayout screen = screen();
         screen.addView(radioHeader());
         screen.addView(pageTitle("‹", "ANA MENÜ"));
@@ -536,10 +700,38 @@ public final class MainActivity extends Activity {
                 MainActivity.this.showHelp();
             }
         });
+        addMenu(list, "♥", "Destekçilerimiz", new Runnable() {
+            @Override public void run() { MainActivity.this.showSponsors(); }
+        });
         ScrollView scroll = new ScrollView(this);
         scroll.addView(list);
         screen.addView(scroll, verticalWeight(1));
         setContentView(screen);
+    }
+
+    private void showSponsors() {
+        this.home = false;
+        LinearLayout root = screen();
+        root.addView(radioHeader());
+        root.addView(pageTitle("‹", "DESTEKÇİLERİMİZ"));
+        LinearLayout body = column();
+        body.addView(info("Nexvo APRS sunucu altyapı sponsoru", GREEN));
+        ImageView logo = new ImageView(this);
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize = 16;
+        logo.setImageBitmap(BitmapFactory.decodeResource(getResources(), tr.aprs.app.R.drawable.sponsor_vds_hosting, options));
+        logo.setAdjustViewBounds(true);
+        logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        logo.setPadding(24, 28, 24, 28);
+        body.addView(logo, new LinearLayout.LayoutParams(-1, 360));
+        body.addView(info("VDS HOSTING BİLİŞİM TEKNOLOJİLERİ\nSunucu desteği: 1 vCPU • 2 GB RAM • 20 GB NVMe • Sabit IPv4\nTB4VAV • 73", TEXT));
+        Button website = action("VDShosting.com SİTESİNİ AÇ", GREEN);
+        website.setOnClickListener(v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://www.vdshosting.com/"))));
+        body.addView(website);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(body);
+        root.addView(scroll, verticalWeight(1));
+        setContentView(root);
     }
 
     /* JADX INFO: Access modifiers changed from: private */
@@ -565,7 +757,7 @@ public final class MainActivity extends Activity {
         LinearLayout root = screen(); root.addView(radioHeader()); root.addView(pageTitle("‹", "KAYITLAR VE TEŞHİS"));
         LinearLayout body = column(); body.addView(info("Son APRS olayları, bağlantı hataları ve beacon kayıtları", TEXT));
         List<String> logs = featureStore.recentLogs(100); for (String item : logs) body.addView(info(item, MUTED));
-        Button share = action("GÜNLÜĞÜ DIŞA AKTAR", GREEN); share.setOnClickListener(v -> shareText("TR APRS teşhis günlüğü", joinLines(featureStore.recentLogs(500)))); body.addView(share);
+        Button share = action("GÜNLÜĞÜ DIŞA AKTAR", GREEN); share.setOnClickListener(v -> shareText("Nexvo APRS teşhis günlüğü", joinLines(featureStore.recentLogs(500)))); body.addView(share);
         ScrollView scroll = new ScrollView(this); scroll.addView(body); root.addView(scroll, verticalWeight(1)); setContentView(root);
     }
 
@@ -577,7 +769,7 @@ public final class MainActivity extends Activity {
         save.setOnClickListener(v -> { String n = name.getText().toString().trim(); if (n.isEmpty()) { toast("Profil adı girin."); return; } getSharedPreferences("profiles", 0).edit().putString(n + "_call", callsign).putString(n + "_dmr", dmrId).putString(n + "_tg", talkGroup).apply(); toast("Profil kaydedildi: " + n); }); body.addView(save);
         Button load = action("PROFİLİ YÜKLE", PANEL_2);
         load.setOnClickListener(v -> { String n = name.getText().toString().trim(); SharedPreferences p = getSharedPreferences("profiles", 0); String c = p.getString(n + "_call", ""); if (c.isEmpty()) { toast("Profil bulunamadı."); return; } callsign = c; dmrId = p.getString(n + "_dmr", ""); talkGroup = p.getString(n + "_tg", "28642"); getPreferences(0).edit().putString("callsign", callsign).putString("dmr_id", dmrId).putString("talkgroup", talkGroup).apply(); toast("Profil yüklendi."); }); body.addView(load);
-        Button backup = action("AYAR YEDEĞİNİ PAYLAŞ", GREEN); backup.setOnClickListener(v -> shareText("TR APRS ayar yedeği", "callsign=" + callsign + "\ndmr_id=" + dmrId + "\ntalkgroup=" + talkGroup + "\nsymbol=" + getPreferences(0).getString("aprs_symbol", ">"))); body.addView(backup);
+        Button backup = action("AYAR YEDEĞİNİ PAYLAŞ", GREEN); backup.setOnClickListener(v -> shareText("Nexvo APRS ayar yedeği", "callsign=" + callsign + "\ndmr_id=" + dmrId + "\ntalkgroup=" + talkGroup + "\nsymbol=" + getPreferences(0).getString("aprs_symbol", ">"))); body.addView(backup);
         root.addView(body, verticalWeight(1)); setContentView(root);
     }
 
@@ -593,7 +785,7 @@ public final class MainActivity extends Activity {
 
     private void requestDeviceUnlock() {
         KeyguardManager manager = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
-        if (manager != null && manager.isDeviceSecure()) { Intent intent = manager.createConfirmDeviceCredentialIntent("TR APRS kilidi", "Devam etmek için kimliğinizi doğrulayın"); if (intent != null) startActivityForResult(intent, 712); }
+        if (manager != null && manager.isDeviceSecure()) { Intent intent = manager.createConfirmDeviceCredentialIntent("Nexvo APRS kilidi", "Devam etmek için kimliğinizi doğrulayın"); if (intent != null) startActivityForResult(intent, 712); }
     }
     private void shareText(String subject, String text) { Intent send = new Intent(Intent.ACTION_SEND); send.setType("text/plain"); send.putExtra(Intent.EXTRA_SUBJECT, subject); send.putExtra(Intent.EXTRA_TEXT, text); startActivity(Intent.createChooser(send, "Dışa aktar")); }
     private static String joinLines(List<String> lines) { StringBuilder out = new StringBuilder(); for (String line : lines) out.append(line).append('\n'); return out.toString(); }
@@ -617,7 +809,7 @@ public final class MainActivity extends Activity {
         if (!lastError.isEmpty()) body.addView(info("Son hata: " + lastError, WARN));
         final TextView apiResult = info("APRS.fi canlı testi henüz çalıştırılmadı.", MUTED); body.addView(apiResult);
         Button apiTest = action("APRS.FI CANLI TEST", GREEN); apiTest.setOnClickListener(v -> runAprsFiSelfTest(apiResult)); body.addView(apiTest);
-        Button report = action("TEST RAPORUNU PAYLAŞ", PANEL_2); report.setOnClickListener(v -> shareText("TR APRS 0.13.0 saha testi", "Çağrı=" + callOk + "\nAPI=" + apiOk + "\nPasscode=" + passOk + "\nKonum=" + locationOk + "\nİnternet=" + networkOk + "\nDurum=" + state + "\nSon hata=" + lastError)); body.addView(report);
+        Button report = action("TEST RAPORUNU PAYLAŞ", PANEL_2); report.setOnClickListener(v -> shareText("Nexvo APRS 0.17.0 saha testi", "Çağrı=" + callOk + "\nAPI=" + apiOk + "\nPasscode=" + passOk + "\nKonum=" + locationOk + "\nİnternet=" + networkOk + "\nDurum=" + state + "\nSon hata=" + lastError)); body.addView(report);
         ScrollView scroll = new ScrollView(this); scroll.addView(body); root.addView(scroll, verticalWeight(1)); setContentView(root);
     }
 
@@ -697,6 +889,7 @@ public final class MainActivity extends Activity {
         LinearLayout box = column();
         box.setPadding(m11dp(18), m11dp(14), m11dp(18), m11dp(18));
         box.addView(title("APRS SEMBOLÜM", 21));
+        box.addView(dialogBack(dialog));
         final TextView selected = info("SEÇİLİ: " + getPreferences(0).getString("aprs_symbol_name", "ARAÇ"), GREEN);
         box.addView(selected);
         String[][] symbols = {new String[]{">", "ARAÇ"}, new String[]{"-", "EV / SABİT"}, new String[]{"[", "YÜRÜYÜŞ"}, new String[]{"k", "KAMYON"}, new String[]{"R", "RV / KARAVAN"}, new String[]{"Y", "TEKNE"}, new String[]{"b", "BİSİKLET"}, new String[]{"O", "BALON"}};
@@ -731,6 +924,7 @@ public final class MainActivity extends Activity {
         LinearLayout box = column();
         box.setPadding(m11dp(18), m11dp(14), m11dp(18), m11dp(18));
         box.addView(title("BİRİMLER", 21));
+        box.addView(dialogBack(dialog));
         TextView selected = info("SEÇİLİ: " + (isImperial() ? "MİL / FEET" : "KM / METRE"), GREEN);
         box.addView(selected);
         Button metric = action("METRİK • KM / KM-SA / METRE", PANEL_2);
@@ -783,7 +977,7 @@ public final class MainActivity extends Activity {
         screen.addView(pageTitle("‹", "YARDIM"));
         LinearLayout body = column();
         body.setPadding(m11dp(16), m11dp(10), m11dp(16), m11dp(22));
-        body.addView(title("TR APRS • HIZLI KILAVUZ", 21));
+        body.addView(title("Nexvo APRS • HIZLI KILAVUZ", 21));
         body.addView(info("HARİTA\nTG’de mandala basan istasyon BrandMeister’dan alınır. Çağrı işaretinin APRS konumu varsa kişi; yoksa BrandMeister koordinat sağlıyorsa kullanılan çıkış haritada gösterilir.", TEXT));
         body.addView(info("APRS MESAJ\nGönderici ve alıcı çağrı işaretini girin. Gönderim için geçerli APRS-IS passcode gerekir; mesaj ACK gelene kadar yeniden denenir.", TEXT));
         body.addView(info("BEACON\nTelefon konumu, hız, irtifa, yön, seçilen APRS sembolü ve TG bilgisi APRS-IS ağına gönderilir.", TEXT));
@@ -797,10 +991,11 @@ public final class MainActivity extends Activity {
     }
 
     private View pageTitle(String back, String title) {
+        this.mainMenuVisible = "ANA MENÜ".equals(title);
         LinearLayout row = row();
         row.setGravity(16);
         row.setPadding(m11dp(10), m11dp(7), m11dp(12), m11dp(7));
-        Button b = smallButton(back);
+        Button b = smallButton(back + " GERİ");
         b.setOnClickListener(new View.OnClickListener() { // from class: tr.aprs.app.MainActivity$$ExternalSyntheticLambda30
             @Override // android.view.View.OnClickListener
             public final void onClick(View view) {
@@ -812,9 +1007,28 @@ public final class MainActivity extends Activity {
         return row;
     }
 
+    private Button dialogBack(final Dialog dialog) {
+        Button back = action("‹ GERİ", PANEL_2);
+        back.setOnClickListener(v -> dialog.dismiss());
+        return back;
+    }
+
+    private Button dialogBack(final Dialog dialog, final Runnable afterDismiss) {
+        Button back = action("‹ GERİ", PANEL_2);
+        back.setOnClickListener(v -> {
+            dialog.dismiss();
+            if (afterDismiss != null) afterDismiss.run();
+        });
+        return back;
+    }
+
     /* JADX INFO: Access modifiers changed from: private */
     public /* synthetic */ void lambda$pageTitle$15(View v) {
-        showDashboard();
+        if (this.mainMenuVisible) {
+            showDashboard();
+        } else {
+            showMainMenu();
+        }
     }
 
     /* JADX INFO: Access modifiers changed from: private */
@@ -823,6 +1037,7 @@ public final class MainActivity extends Activity {
         LinearLayout box = column();
         box.setPadding(m11dp(18), m11dp(16), m11dp(18), m11dp(18));
         box.addView(title("ÇAĞRI / DMR ARA", 21));
+        box.addView(dialogBack(d));
         final EditText q = field("TA1ABC-9 veya DMR ID", false);
         box.addView(q);
         Button search = action("SORGULA", GREEN);
@@ -1069,7 +1284,7 @@ public final class MainActivity extends Activity {
             textView2.setText(sbAppend2.append(str2).append("\n    Mesafe ").append(distance3).append("  •  İrtifa ").append((int) shownAltitude).append(" ").append(altitudeUnit).append("\n    ").append(movement2).append("  •  Hız ").append((int) shownSpeed).append(" ").append(speedUnit).append("  •  Yön ").append((int) s.course).append("°").toString());
             if (this.map != null) {
                 String mapDetail = s.name + (dmr.isEmpty() ? "" : " • DMR " + dmr) + "\nMesafe: " + distance3 + "\nİrtifa: " + ((int) shownAltitude) + " " + altitudeUnit + "\n" + movement2 + " • " + ((int) shownSpeed) + " " + speedUnit + "\nYön: " + ((int) s.course) + "°";
-                this.map.lambda$updateStationDetails$0(s.name, s.latitude, s.longitude, false, mapDetail);
+                this.map.updateStationDetails(s.name, s.latitude, s.longitude, false, mapDetail, s.speed >= 3.0d);
             }
         }
         distanceKm = -1.0f;
@@ -1132,7 +1347,8 @@ public final class MainActivity extends Activity {
         textView4.setText(sbAppend4.append(str2).append("\n    Mesafe ").append(distance3).append("  •  İrtifa ").append((int) shownAltitude).append(" ").append(altitudeUnit).append("\n    ").append(movement2).append("  •  Hız ").append((int) shownSpeed).append(" ").append(speedUnit).append("  •  Yön ").append((int) s.course).append("°").toString());
         if (this.map != null) {
             String mapDetail2 = s.name + (dmr.isEmpty() ? "" : " • DMR " + dmr) + "\nMesafe: " + distance3 + "\nİrtifa: " + ((int) shownAltitude) + " " + altitudeUnit + "\n" + movement2 + " • " + ((int) shownSpeed) + " " + speedUnit + "\nYön: " + ((int) s.course) + "°";
-            this.map.lambda$updateStationDetails$0(s.name, s.latitude, s.longitude, false, mapDetail2);
+            this.map.updateStationDetails(s.name, s.latitude, s.longitude,
+                    sameStationIdentity(s.name, this.callsign), mapDetail2, s.speed >= 3.0d);
         }
     }
 
@@ -1150,8 +1366,8 @@ public final class MainActivity extends Activity {
         sender.setText(this.callsign);
         sender.setAllCaps(true);
         addressing.addView(sender);
-        addressing.addView(label("ALICI ÇAĞRI İŞARETİ / SSID"));
-        final EditText recipient = field("Ör. TA1ABC-9", false);
+        addressing.addView(label("ALICI ÇAĞRI İŞARETİ / SSID VEYA DMR ID"));
+        final EditText recipient = field("Ör. TA1ABC-9 veya 2861234", false);
         if (target != null && !target.equalsIgnoreCase(this.callsign)) {
             recipient.setText(target);
         }
@@ -1161,7 +1377,7 @@ public final class MainActivity extends Activity {
         linearLayoutColumn.addView(addressing);
         final LinearLayout messages = column();
         messages.setPadding(m11dp(12), m11dp(12), m11dp(12), m11dp(12));
-        final TextView loading = info("Alıcı çağrı işaretini girin.", MUTED);
+        final TextView loading = info("Alıcı çağrı işareti/SSID veya 7 haneli DMR ID girin.", MUTED);
         messages.addView(loading);
         linearLayoutColumn.addView(messages);
         scrollView.addView(linearLayoutColumn);
@@ -1209,14 +1425,18 @@ public final class MainActivity extends Activity {
             return;
         }
         if (destination.isEmpty()) {
-            toast("Alıcı çağrı işaretini girin.");
+            toast("Alıcı çağrı işareti/SSID veya DMR ID girin.");
             return;
         }
-        if (!destination.matches("[A-Z0-9]{3,6}(-[A-Z0-9]{1,2})?")) {
-            toast("Alıcı çağrı işareti/SSID geçersiz.");
+        if (!destination.matches("[A-Z0-9]{3,6}(-[0-9]{1,2})?") && !destination.matches("[0-9]{7}")) {
+            toast("Çağrı işareti/SSID veya 7 haneli DMR ID geçersiz.");
             return;
         }
         if (body.isEmpty()) {
+            return;
+        }
+        if (body.length() > 67) {
+            toast("APRS mesajı en fazla 67 karakter olabilir.");
             return;
         }
         if (!source.equalsIgnoreCase(this.callsign)) {
@@ -1228,32 +1448,59 @@ public final class MainActivity extends Activity {
         }
         final TextView outgoing = (TextView) messageBubble(source + " • HAZIRLANIYOR", body);
         messages.addView(outgoing);
+        String nexvoToken = this.secureStore.readNexvoToken();
+        if (!nexvoToken.isEmpty()) {
+            String aprsPasscode = this.secureStore.readAprsPasscode();
+            if (aprsPasscode.isEmpty()) {
+                outgoing.setText(source + " • APRS-IS PASSCODE EKSİK\n" + body);
+                toast("Çok kullanıcılı sunucu gönderimi için Profilim ekranında APRS-IS passcode girin.");
+                return;
+            }
+            this.nexvo.send(nexvoToken, source, aprsPasscode, destination, body, new NexvoApiClient.Callback<NexvoApiClient.SendResult>() {
+                @Override public void onSuccess(NexvoApiClient.SendResult result) {
+                    runOnUiThread(() -> {
+                        String resolved = result.dmrId.isEmpty() ? result.recipient : result.dmrId + " → " + result.recipient;
+                        outgoing.setText(source + " → " + resolved + " • SUNUCU KUYRUĞUNDA • #" + result.id + "\n" + body);
+                        input.setText("");
+                        featureStore.message(result.recipient, "GİDEN", body, "SUNUCU KUYRUĞUNDA");
+                        toast(result.dmrId.isEmpty() ? "Mesaj Nexvo sunucusuna ulaştı; APRS ACK beklenecek." : "DMR ID " + result.recipient + " çağrı işaretine çözüldü; APRS ACK beklenecek.");
+                    });
+                }
+                @Override public void onError(String error) {
+                    runOnUiThread(() -> {
+                        if (!destination.matches("[0-9]{7}") && (error.contains("503") || error.contains("mesaj servisi şu anda çevrimdışı"))) {
+                            String fallbackId = aprs.sendReliableMessage(destination, body, new AprsIsClient.DeliveryCallback() {
+                                @Override public void onStatus(String messageId, String status, int attempt) {
+                                    lambda$showMessages$18(outgoing, source, body, messageId, status, attempt);
+                                }
+                            });
+                            if (fallbackId != null) {
+                                input.setText("");
+                                featureStore.message(destination, "GİDEN", body, "DOĞRUDAN APRS • ACK BEKLENİYOR");
+                                outgoing.setText(source + " • VDS ÇEVRİMDIŞI • DOĞRUDAN APRS GÖNDERİLDİ\n" + body);
+                                toast("VDS mesaj servisi çevrimdışı; doğrudan APRS-IS kullanıldı.");
+                                return;
+                            }
+                        }
+                        outgoing.setText(source + " • SUNUCUYA ULAŞMADI\n" + body);
+                        toast(error + " APRS-IS TX bağlantısını kontrol edin.");
+                    });
+                }
+            });
+            return;
+        }
         String id = this.aprs.sendReliableMessage(destination, body, new AprsIsClient.DeliveryCallback() { // from class: tr.aprs.app.MainActivity$$ExternalSyntheticLambda23
             @Override // tr.aprs.app.AprsIsClient.DeliveryCallback
             public final void onStatus(String str, String str2, int r10) {
                 MainActivity.this.lambda$showMessages$18(outgoing, source, body, str, str2, r10);
             }
         });
-        String nexvoToken = this.secureStore.readNexvoToken();
-        if (!nexvoToken.isEmpty()) {
-            this.nexvo.send(nexvoToken, source, destination, body, new NexvoApiClient.Callback<Long>() {
-                @Override public void onSuccess(Long serverId) {
-                    runOnUiThread(() -> outgoing.setText(source + " • NEXVO SUNUCUSUNDA BEKLİYOR • #" + serverId + "\n" + body));
-                }
-                @Override public void onError(String error) {
-                    runOnUiThread(() -> toast(error));
-                }
-            });
-        }
         if (id != null) {
             featureStore.message(destination, "GİDEN", body, "ACK BEKLENİYOR");
             input.setText("");
-            toast(nexvoToken.isEmpty() ? "APRS mesajı gönderim sırasına alındı; ACK beklenecek." : "Mesaj APRS ve Nexvo sırasına alındı.");
-        } else if (!nexvoToken.isEmpty()) {
-            featureStore.message(destination, "GİDEN", body, "NEXVO KUYRUĞUNDA");
-            input.setText("");
-            toast("APRS-IS çevrimdışı; mesaj Nexvo sunucusuna gönderiliyor.");
+            toast("APRS mesajı doğrudan gönderildi; ACK beklenecek.");
         } else {
+            outgoing.setText(source + " • GÖNDERİLEMEDİ • APRS-IS TX DOĞRULANMADI\n" + body);
             toast("APRS-IS doğrulanmadı ve Nexvo anahtarı yok. Profil ayarlarını kontrol edin.");
         }
     }
@@ -1289,12 +1536,17 @@ public final class MainActivity extends Activity {
         String nexvoToken = this.secureStore.readNexvoToken();
         if (!nexvoToken.isEmpty()) {
             loading.setText("Nexvo çevrimdışı mesajları yükleniyor…");
-            this.nexvo.messages(nexvoToken, destination, new NexvoApiClient.Callback<List<NexvoApiClient.Message>>() {
+            String aprsPasscode = this.secureStore.readAprsPasscode();
+            if (aprsPasscode.isEmpty()) {
+                loading.setText("Mesaj geçmişi için APRS-IS passcode gerekli.");
+                return;
+            }
+            this.nexvo.messages(nexvoToken, destination, aprsPasscode, new NexvoApiClient.Callback<List<NexvoApiClient.Message>>() {
                 @Override public void onSuccess(List<NexvoApiClient.Message> items) {
                     runOnUiThread(() -> {
                         messages.removeAllViews();
                         if (items.isEmpty()) messages.addView(info("Nexvo sunucusunda mesaj bulunamadı.", MUTED));
-                        for (NexvoApiClient.Message m : items) messages.addView(messageBubble(m.sender + " → " + m.recipient + " • " + m.status, m.body));
+                        for (NexvoApiClient.Message m : items) messages.addView(messageBubble(m.sender + " → " + m.recipient + " • " + messageStatus(m.status), m.body));
                     });
                 }
                 @Override public void onError(String error) { runOnUiThread(() -> loading.setText(error)); }
@@ -1307,6 +1559,20 @@ public final class MainActivity extends Activity {
         } else {
             loading.setText("Mesajlar yükleniyor…");
             new AprsFiClient().getMessages(destination, key, new C01153(messages, loading));
+        }
+    }
+
+    private static String messageStatus(String status) {
+        if (status == null) return "BİLİNMİYOR";
+        switch (status.toLowerCase(Locale.ROOT)) {
+            case "queued": return "KUYRUKTA";
+            case "sent": return "GÖNDERİLDİ • ACK BEKLENİYOR";
+            case "retrying": return "TEKRAR DENENİYOR";
+            case "acked": return "TESLİM EDİLDİ (ACK)";
+            case "received": return "ALINDI";
+            case "rejected": return "REDDEDİLDİ (REJ)";
+            case "failed": return "TESLİM EDİLEMEDİ";
+            default: return status.toUpperCase(Locale.ROOT);
         }
     }
 
@@ -1375,6 +1641,7 @@ public final class MainActivity extends Activity {
         LinearLayout box = column();
         box.setPadding(m11dp(18), m11dp(15), m11dp(18), m11dp(18));
         box.addView(title("TG ve DMR", 22));
+        box.addView(dialogBack(d));
         final EditText tg = field("Talk Group", false);
         tg.setInputType(2);
         tg.setText(this.talkGroup);
@@ -1424,6 +1691,15 @@ public final class MainActivity extends Activity {
             }
         });
         box.addView(save);
+        Button center = action("DMR–APRS MERKEZİ", GREEN);
+        center.setTextColor(f15BG);
+        center.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                d.dismiss();
+                MainActivity.this.showDmrAprsCenter();
+            }
+        });
+        box.addView(center);
         box.addView(info("Konuşmacı bilgisi Last Heard, ses ise resmî BrandMeister Hoseline üzerinden alınır. Yalnızca RX/dinleme yapılır.", MUTED));
         d.setContentView(box);
         if (d.getWindow() != null) {
@@ -1432,14 +1708,109 @@ public final class MainActivity extends Activity {
         d.show();
     }
 
+    private void showDmrAprsCenter() {
+        final Dialog d = new Dialog(this);
+        LinearLayout box = column();
+        box.setPadding(m11dp(16), m11dp(12), m11dp(16), m11dp(18));
+        box.addView(title("DMR–APRS MERKEZİ", 21));
+        box.addView(dialogBack(d, this::showTalkGroupDialog));
+        TextView status = info("TG " + talkGroup + " • Profil, TG mesajı, yoklama ve sunucu geçmişi", MUTED);
+        box.addView(status);
+        Button register = action("PROFİLİ KAYDET • TG MESAJLARINI AÇ", GREEN);
+        register.setTextColor(f15BG);
+        register.setOnClickListener(v -> registerServerProfile(status));
+        box.addView(register);
+        final EditText groupMessage = field("TG üyelerine APRS mesajı (en çok 67 karakter)", false);
+        box.addView(groupMessage);
+        Button sendGroup = action("TG " + talkGroup + " • AKTİF ÜYELERE GÖNDER", PANEL_2);
+        sendGroup.setOnClickListener(v -> {
+            String body = groupMessage.getText().toString().trim();
+            if (body.isEmpty()) { toast("Mesaj yazın."); return; }
+            status.setText("TG mesajı sıraya alınıyor…");
+            nexvo.sendTalkgroup(secureStore.readNexvoToken(), callsign, secureStore.readAprsPasscode(), talkGroup, body, true, uiJson(status, "TG mesajı sıraya alındı"));
+        });
+        box.addView(sendGroup);
+        final EditText netName = field("Çevrim / yoklama adı (ör. PAZAR ÇEVRİMİ)", false);
+        box.addView(netName);
+        Button checkin = action("YOKLAMAYA KATIL", PANEL_2);
+        checkin.setOnClickListener(v -> nexvo.checkIn(secureStore.readNexvoToken(), callsign, secureStore.readAprsPasscode(), talkGroup, netName.getText().toString().trim(), uiJson(status, "Yoklamaya kaydedildiniz")));
+        box.addView(checkin);
+        Button checkinList = action("YOKLAMA LİSTESİNİ GETİR", PANEL_2);
+        checkinList.setOnClickListener(v -> nexvo.checkInList(secureStore.readNexvoToken(), callsign, secureStore.readAprsPasscode(), talkGroup, netName.getText().toString().trim(), new NexvoApiClient.Callback<JSONObject>() {
+            public void onSuccess(JSONObject value) { runOnUiThread(() -> status.setText(formatList(value.optJSONArray("checkins"), "callsign", "dmr_id", "Henüz yoklama kaydı yok."))); }
+            public void onError(String error) { runOnUiThread(() -> status.setText(error)); }
+        }));
+        box.addView(checkinList);
+        Button serverHistory = action("SUNUCU TG KONUŞMACI GEÇMİŞİ", PANEL_2);
+        serverHistory.setOnClickListener(v -> nexvo.talkgroupHistory(secureStore.readNexvoToken(), callsign, secureStore.readAprsPasscode(), talkGroup, new NexvoApiClient.Callback<JSONObject>() {
+            public void onSuccess(JSONObject value) { runOnUiThread(() -> status.setText(formatList(value.optJSONArray("talkers"), "callsign", "dmr_id", "Sunucuda konuşmacı kaydı yok."))); }
+            public void onError(String error) { runOnUiThread(() -> status.setText(error)); }
+        }));
+        box.addView(serverHistory);
+        Button serverStatus = action("SUNUCU SAĞLIK VE KUYRUK DURUMU", PANEL_2);
+        serverStatus.setOnClickListener(v -> nexvo.systemStatus(secureStore.readNexvoToken(), callsign, secureStore.readAprsPasscode(), new NexvoApiClient.Callback<JSONObject>() {
+            public void onSuccess(JSONObject value) { runOnUiThread(() -> status.setText("Sunucu: " + value.optJSONObject("worker") + "\nMesajlar: " + value.optJSONObject("message_counts") + "\nProfiller: " + value.optInt("profiles") + " • TG üyelikleri: " + value.optInt("tg_memberships"))); }
+            public void onError(String error) { runOnUiThread(() -> status.setText(error)); }
+        }));
+        box.addView(serverStatus);
+        box.addView(dialogBack(d, this::showTalkGroupDialog));
+        ScrollView scroll = new ScrollView(this); scroll.addView(box);
+        d.setContentView(scroll);
+        if (d.getWindow() != null) d.getWindow().setBackgroundDrawable(round(f15BG, GREEN, 1, 10));
+        d.show();
+        if (d.getWindow() != null) d.getWindow().setLayout(-1, -1);
+    }
+
+    private NexvoApiClient.Callback<JSONObject> uiJson(final TextView status, final String success) {
+        return new NexvoApiClient.Callback<JSONObject>() {
+            public void onSuccess(JSONObject value) { runOnUiThread(() -> status.setText(success + (value.has("target_count") ? " • " + value.optInt("target_count") + " alıcı" : ""))); }
+            public void onError(String error) { runOnUiThread(() -> status.setText(error)); }
+        };
+    }
+
+    private void registerServerProfile(final TextView status) {
+        status.setText("Profil doğrulanıyor…");
+        nexvo.registerProfile(secureStore.readNexvoToken(), callsign, secureStore.readAprsPasscode(), dmrId, callsign, talkGroup, true, new NexvoApiClient.Callback<JSONObject>() {
+            public void onSuccess(JSONObject value) {
+                String fcm = getSharedPreferences("nexvo", MODE_PRIVATE).getString("fcm_token", "");
+                if (!fcm.isEmpty()) nexvo.registerDevice(secureStore.readNexvoToken(), callsign, fcm, uiJson(status, "Profil ve bildirimler hazır"));
+                else runOnUiThread(() -> status.setText("Profil hazır • " + callsign + " • TG " + talkGroup + " mesajları açık"));
+            }
+            public void onError(String error) { runOnUiThread(() -> status.setText(error)); }
+        });
+    }
+
+    private String formatList(JSONArray items, String first, String second, String empty) {
+        if (items == null || items.length() == 0) return empty;
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < items.length() && i < 30; i++) {
+            JSONObject item = items.optJSONObject(i); if (item == null) continue;
+            if (out.length() > 0) out.append('\n');
+            out.append(item.optString(first, "BİLİNMİYOR"));
+            String extra = item.optString(second); if (!extra.isEmpty()) out.append(" • DMR ").append(extra);
+        }
+        return out.toString();
+    }
+
     /* JADX INFO: Access modifiers changed from: private */
     public /* synthetic */ void lambda$showTalkGroupDialog$24(EditText tg, Dialog d, View v) {
         String value = tg.getText().toString().trim();
-        if (!value.isEmpty()) {
-            this.talkGroup = value;
+        if (value.isEmpty() || !value.matches("\\d+")) {
+            toast("Geçerli bir TG numarası yazın.");
+            return;
         }
+        if (!value.equals(this.talkGroup)) {
+            stopTgListening();
+            this.brandMeister.disconnect();
+            getPreferences(0).edit().remove("last_talker_tg").remove("last_talker_text").apply();
+        }
+        this.talkGroup = value;
+        getPreferences(0).edit().putString("talkgroup", value).apply();
         d.dismiss();
-        openHoseline();
+        showDashboard();
+        getWindow().getDecorView().postDelayed(() -> {
+            if (this.tgListenButton != null && !this.tgListening) this.tgListenButton.performClick();
+        }, 350L);
     }
 
     /* JADX INFO: Access modifiers changed from: private */
@@ -1459,6 +1830,8 @@ public final class MainActivity extends Activity {
         String value = tg.getText().toString().trim();
         if (!value.isEmpty()) {
             if (!value.equals(this.talkGroup)) {
+                stopTgListening();
+                this.brandMeister.disconnect();
                 getPreferences(0).edit().remove("last_talker_tg").remove("last_talker_text").apply();
             }
             this.talkGroup = value;
@@ -1476,11 +1849,6 @@ public final class MainActivity extends Activity {
         LinearLayout linearLayoutColumn = column();
         linearLayoutColumn.setPadding(m11dp(16), m11dp(8), m11dp(16), m11dp(22));
         final SharedPreferences prefs = getPreferences(0);
-        if ("HYTALK".equals(prefs.getString("ptt_backend", ""))) {
-            prefs.edit().remove("ptt_backend").apply();
-        }
-        prefs.edit().remove("hytalk_server").remove("hytalk_user").apply();
-        this.secureStore.clearHyTalkPassword();
         final TextView selectedPtt = info("SEÇİLİ PTT ALTYAPISI: " + prefs.getString("ptt_backend", "AYARLANMADI"), GREEN);
         linearLayoutColumn.addView(selectedPtt);
         LinearLayout backendRow = row();
@@ -1587,16 +1955,6 @@ public final class MainActivity extends Activity {
         ptt.setEnabled(false);
         linearLayoutColumn.addView(ptt);
         linearLayoutColumn.addView(info("PTT şu anda bilinçli olarak kapalıdır: Mumble/DVSwitch bağlantısı veya BrandMeister uyumlu lisanslı AMBE vocoder sağlanmadan ses gönderilemez. Bu düğme ağda sahte yayın yapmaz.", MUTED));
-        Button referencePtt = action("DİGİ VOICE PTT UYGULAMASINI AÇ", GREEN);
-        referencePtt.setTextColor(f15BG);
-        referencePtt.setOnClickListener(new View.OnClickListener() { // from class: tr.aprs.app.MainActivity$$ExternalSyntheticLambda20
-            @Override // android.view.View.OnClickListener
-            public final void onClick(View view) {
-                MainActivity.this.lambda$showDmrPttSetup$32(view);
-            }
-        });
-        linearLayoutColumn.addView(referencePtt);
-        linearLayoutColumn.addView(info("Referans uygulama kuruluysa gerçek DMR PTT için açılır. Hesap ve TG ayarları Digi Voice içinde ayrıca yapılır; parolalar uygulamalar arasında paylaşılmaz.", MUTED));
         scrollView.addView(linearLayoutColumn);
         linearLayoutScreen.addView(scrollView, verticalWeight(1));
         setContentView(linearLayoutScreen);
@@ -1648,11 +2006,6 @@ public final class MainActivity extends Activity {
         } catch (Exception e2) {
             toast("Parolalar güvenli kaydedilemedi.");
         }
-    }
-
-    /* JADX INFO: Access modifiers changed from: private */
-    public /* synthetic */ void lambda$showDmrPttSetup$32(View v) {
-        openInstalledApp("com.alg.dmrvoice");
     }
 
     /* JADX INFO: Access modifiers changed from: private */
@@ -1786,7 +2139,7 @@ public final class MainActivity extends Activity {
             }
             String symbolSetting = getPreferences(0).getString("aprs_symbol", ">");
             char beaconSymbol = symbolSetting.isEmpty() ? '>' : symbolSetting.charAt(0);
-            boolean sent = this.aprs.sendBeacon(location.getLatitude(), location.getLongitude(), location.hasAltitude() ? location.getAltitude() : 0.0d, location.hasSpeed() ? ((double) location.getSpeed()) * 3.6d : 0.0d, location.hasBearing() ? location.getBearing() : 0.0d, beaconSymbol, "TR APRS • TG " + this.talkGroup);
+            boolean sent = this.aprs.sendBeacon(location.getLatitude(), location.getLongitude(), location.hasAltitude() ? location.getAltitude() : 0.0d, location.hasSpeed() ? ((double) location.getSpeed()) * 3.6d : 0.0d, location.hasBearing() ? location.getBearing() : 0.0d, beaconSymbol, "Nexvo APRS • TG " + this.talkGroup);
             if (this.signalPanel != null) this.signalPanel.setText("GPS ●   NET ●   RX " + this.stationCount + "   TX " + (sent ? "●" : "✕"));
             toast(sent ? "Beacon APRS-IS ağına gönderildi." : "Beacon gönderilemedi.");
             return;
@@ -1801,7 +2154,7 @@ public final class MainActivity extends Activity {
         double latitude = location == null ? 41.0082d : location.getLatitude();
         double longitude = location == null ? 28.9784d : location.getLongitude();
         if (this.map != null && location != null) {
-            this.map.updateStation(this.callsign, latitude, longitude, true);
+            this.map.updateStation(this.callsign, latitude, longitude, true, location.hasSpeed() && location.getSpeed() * 3.6f >= 3.0f);
         }
         this.aprs.connect(this.callsign, this.secureStore.readAprsPasscode(), latitude, longitude, new C01164());
         this.brandMeister.connect(this.talkGroup, new C01175());
@@ -1819,6 +2172,67 @@ public final class MainActivity extends Activity {
             if (network == null) return gps;
             return gps.getTime() >= network.getTime() ? gps : network;
         } catch (SecurityException ignored) { return null; }
+    }
+
+    private void enqueueAprsPacket(final AprsPacketParser.Packet packet) {
+        boolean schedule;
+        synchronized (this.pendingAprsPackets) {
+            this.pendingAprsPackets.put(packet.source, packet);
+            schedule = !this.aprsUiFlushScheduled;
+            if (schedule) this.aprsUiFlushScheduled = true;
+        }
+        if (!schedule) return;
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                getWindow().getDecorView().postDelayed(new Runnable() {
+                    @Override public void run() { flushAprsPackets(); }
+                }, 300L);
+            }
+        });
+    }
+
+    private void flushAprsPackets() {
+        ArrayList<AprsPacketParser.Packet> packets;
+        synchronized (this.pendingAprsPackets) {
+            packets = new ArrayList<>(this.pendingAprsPackets.values());
+            this.pendingAprsPackets.clear();
+            this.aprsUiFlushScheduled = false;
+        }
+        if (this.destroyed) return;
+        this.stationCount += packets.size();
+        WebMapPanel currentMap = this.map;
+        for (AprsPacketParser.Packet packet : packets) {
+            if (currentMap != null) {
+                currentMap.updateStation(packet.source, packet.latitude, packet.longitude,
+                        sameStationIdentity(packet.source, this.callsign));
+            }
+        }
+        if (!packets.isEmpty()) {
+            AprsPacketParser.Packet last = packets.get(packets.size() - 1);
+            this.featureStore.log("RX", "PACKET", last.source + " " + last.latitude + "," + last.longitude);
+        }
+        if (this.rxState != null) this.rxState.setText("GPS ●  APRS ●  RX " + this.stationCount);
+        if (this.signalPanel != null) this.signalPanel.setText("GPS ●   NET ●   RX " + this.stationCount + "   TX —");
+        synchronized (this.pendingAprsPackets) {
+            if (!this.pendingAprsPackets.isEmpty() && !this.aprsUiFlushScheduled) {
+                this.aprsUiFlushScheduled = true;
+                getWindow().getDecorView().postDelayed(new Runnable() {
+                    @Override public void run() { flushAprsPackets(); }
+                }, 300L);
+            }
+        }
+    }
+
+    private static boolean sameStationIdentity(String first, String second) {
+        if (first == null || second == null) return false;
+        String a = first.trim().toUpperCase(Locale.ROOT);
+        String b = second.trim().toUpperCase(Locale.ROOT);
+        if (a.equals(b)) return true;
+        int dashA = a.indexOf('-');
+        int dashB = b.indexOf('-');
+        if (dashA > 0) a = a.substring(0, dashA);
+        if (dashB > 0) b = b.substring(0, dashB);
+        return !a.isEmpty() && a.equals(b);
     }
 
     /* JADX INFO: renamed from: tr.aprs.app.MainActivity$4 */
@@ -1850,25 +2264,7 @@ public final class MainActivity extends Activity {
 
         @Override // tr.aprs.app.AprsIsClient.Listener
         public void onPacket(final AprsPacketParser.Packet p) {
-            MainActivity.this.runOnUiThread(new Runnable() { // from class: tr.aprs.app.MainActivity$4$$ExternalSyntheticLambda0
-                @Override // java.lang.Runnable
-                public final void run() {
-                    C01164.this.lambda$onPacket$1(p);
-                }
-            });
-        }
-
-        /* JADX INFO: Access modifiers changed from: private */
-        public /* synthetic */ void lambda$onPacket$1(AprsPacketParser.Packet p) {
-            MainActivity.this.stationCount++;
-            MainActivity.this.featureStore.log("RX", "PACKET", p.source + " " + p.latitude + "," + p.longitude);
-            if (MainActivity.this.map != null) {
-                MainActivity.this.map.updateStation(p.source, p.latitude, p.longitude, p.source.equalsIgnoreCase(MainActivity.this.callsign));
-            }
-            if (MainActivity.this.rxState != null) {
-                MainActivity.this.rxState.setText("GPS ●  APRS ●  RX " + MainActivity.this.stationCount);
-            }
-            if (MainActivity.this.signalPanel != null) MainActivity.this.signalPanel.setText("GPS ●   NET ●   RX " + MainActivity.this.stationCount + "   TX —");
+            MainActivity.this.enqueueAprsPacket(p);
         }
 
         @Override // tr.aprs.app.AprsIsClient.Listener
@@ -1955,7 +2351,23 @@ public final class MainActivity extends Activity {
             String outputName;
             String phase = "Session-Stop".equalsIgnoreCase(t.event) ? "SON KONUŞAN" : "KONUŞUYOR";
             MainActivity.this.recordTalker(t, phase);
-            String identity = t.callsign.isEmpty() ? "ÇAĞRI İŞARETİ YOK" : t.callsign;
+            if (!MainActivity.this.secureStore.readNexvoToken().isEmpty()
+                    && !MainActivity.this.secureStore.readAprsPasscode().isEmpty()) {
+                MainActivity.this.nexvo.publishTalker(
+                        MainActivity.this.secureStore.readNexvoToken(), MainActivity.this.callsign,
+                        MainActivity.this.secureStore.readAprsPasscode(), String.valueOf(t.talkGroup),
+                        t.dmrId, t.callsign, t.name, t.event, t.slot, t.linkCall,
+                        new NexvoApiClient.Callback<JSONObject>() {
+                            public void onSuccess(JSONObject ignored) { }
+                            public void onError(String ignored) { }
+                        });
+            }
+            String resolvedCallsign = t.callsign;
+            if (resolvedCallsign.isEmpty() && !MainActivity.this.dmrId.isEmpty()
+                    && MainActivity.this.dmrId.equals(String.valueOf(t.dmrId))) {
+                resolvedCallsign = MainActivity.this.callsign;
+            }
+            String identity = resolvedCallsign.isEmpty() ? "DMR " + t.dmrId : resolvedCallsign;
             String talkerText = "TG " + t.talkGroup + " • " + phase + "\nİSİM: " + (t.name.isEmpty() ? "BİLİNMİYOR" : t.name) + "\nÇAĞRI: " + identity + " • DMR " + t.dmrId + " • SLOT " + t.slot + (t.alias.isEmpty() ? "" : "\nALIAS: " + t.alias) + (t.linkCall.isEmpty() ? "" : "\nBAĞLANTI: " + t.linkCall);
             if (MainActivity.this.activeTalker != null) {
                 MainActivity.this.activeTalker.setText(talkerText);
@@ -1972,8 +2384,8 @@ public final class MainActivity extends Activity {
                 MainActivity.this.map.updateDmrStation("ÇIKIŞ " + outputName, t.linkLatitude, t.linkLongitude, outputDetail);
                 MainActivity.this.selectedCard.setText(outputDetail.replace("\n", " • "));
             }
-            if (!t.callsign.isEmpty()) {
-                MainActivity.this.queryAprsSilent(t.callsign, String.valueOf(t.dmrId));
+            if (!resolvedCallsign.isEmpty()) {
+                MainActivity.this.queryAprsSilent(resolvedCallsign, String.valueOf(t.dmrId));
             }
         }
     }
@@ -2000,6 +2412,7 @@ public final class MainActivity extends Activity {
         LinearLayout linearLayoutColumn = column();
         linearLayoutColumn.setPadding(m11dp(16), m11dp(12), m11dp(16), m11dp(16));
         linearLayoutColumn.addView(title("TG " + this.talkGroup + " • KONUŞMACILAR", 21));
+        linearLayoutColumn.addView(dialogBack(dialog, this::showTalkGroupDialog));
         linearLayoutColumn.addView(info("BrandMeister canlı akışından bu cihaz açıkken alınan son 100 görüşme olayı.", MUTED));
         LinearLayout rows = column();
         if (this.talkerHistory.isEmpty()) {
@@ -2062,7 +2475,7 @@ public final class MainActivity extends Activity {
         /* JADX INFO: Access modifiers changed from: private */
         public /* synthetic */ void lambda$onSuccess$0(AprsFiClient.Station s, String dmr) {
             MainActivity.this.updateStation(s, dmr);
-            if (MainActivity.this.map != null) MainActivity.this.map.pinStation(s.name, false);
+            if (MainActivity.this.map != null) MainActivity.this.map.pinStation(s.name, true);
         }
 
         @Override // tr.aprs.app.AprsFiClient.Callback
@@ -2097,15 +2510,6 @@ public final class MainActivity extends Activity {
         startActivity(new Intent("android.intent.action.VIEW", Uri.parse(url)));
     }
 
-    private void openInstalledApp(String packageName) {
-        Intent launch = getPackageManager().getLaunchIntentForPackage(packageName);
-        if (launch == null) {
-            toast("Digi Voice kurulu değil. Önce verdiğiniz APK'yı cihaza kurun.");
-        } else {
-            startActivity(launch);
-        }
-    }
-
     private static final class TalkerEntry {
         final String callsign;
         final long dmrId;
@@ -2128,14 +2532,17 @@ public final class MainActivity extends Activity {
     public void onBackPressed() {
         if (this.home) {
             super.onBackPressed();
-        } else {
+        } else if (this.mainMenuVisible) {
             showDashboard();
+        } else {
+            showMainMenu();
         }
     }
 
     @Override // android.app.Activity
     protected void onDestroy() {
         this.destroyed = true;
+        stopTgListening();
         this.aprs.disconnect();
         this.brandMeister.disconnect();
         if (this.featureStore != null) this.featureStore.close();
@@ -2154,7 +2561,11 @@ public final class MainActivity extends Activity {
         if (code != 4 || this.home) {
             return super.onKeyDown(code, event);
         }
-        showDashboard();
+        if (this.mainMenuVisible) {
+            showDashboard();
+        } else {
+            showMainMenu();
+        }
         return true;
     }
 
@@ -2212,9 +2623,9 @@ public final class MainActivity extends Activity {
     }
 
     private TextView metric(String name, String value) {
-        TextView v = text(name + "\n" + value, this.compact ? 10 : 12, TEXT, false);
+        TextView v = text(name + "\n" + value, this.compact ? 9 : (this.denseUi ? 10 : 11), TEXT, false);
         v.setGravity(17);
-        v.setPadding(m11dp(4), m11dp(5), m11dp(4), m11dp(6));
+        v.setPadding(m11dp(3), m11dp(this.denseUi ? 2 : 4), m11dp(3), m11dp(this.denseUi ? 2 : 4));
         v.setBackgroundColor(PANEL);
         return v;
     }
@@ -2239,12 +2650,12 @@ public final class MainActivity extends Activity {
         Button b = new Button(this);
         b.setText(value);
         b.setTextColor(TEXT);
-        b.setTextSize(13.0f);
+        b.setTextSize(this.denseUi ? 11.0f : 13.0f);
         b.setTypeface(Typeface.DEFAULT, 1);
         b.setAllCaps(false);
         b.setBackground(round(color, color, 1, 6));
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, m11dp(52));
-        p.setMargins(m11dp(3), m11dp(4), m11dp(3), m11dp(4));
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, m11dp(this.denseUi ? 44 : 50));
+        p.setMargins(m11dp(3), m11dp(this.denseUi ? 2 : 3), m11dp(3), m11dp(this.denseUi ? 2 : 3));
         b.setLayoutParams(p);
         return b;
     }
