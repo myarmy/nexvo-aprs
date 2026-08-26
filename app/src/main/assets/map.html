@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="leaflet/leaflet.css">
+  <script src="leaflet/leaflet.js"></script>
   <style>
     html,body,#map{height:100%;margin:0;background:#151819}
     .leaflet-control-attribution{font-size:9px}
@@ -13,6 +13,10 @@
     .aprs-marker.self{background:#ffffff;box-shadow:0 0 0 4px rgba(57,217,138,.40)}
     .aprs-marker.dmr{background:#f5a623;box-shadow:0 0 0 4px rgba(245,166,35,.30)}
     .aprs-marker.stale{opacity:.45}
+    .station-symbol{width:34px;height:34px;border-radius:17px;background:#24282b;border:2px solid #39d98a;
+      box-shadow:0 0 0 4px rgba(57,217,138,.22);display:flex;align-items:center;justify-content:center;
+      font-size:23px;line-height:34px}
+    .station-symbol.repeater{border-color:#f5a623;box-shadow:0 0 0 4px rgba(245,166,35,.25)}
     .label{background:#24282b;color:#fff;border:1px solid #39d98a;border-radius:4px;
       padding:3px 6px;font:bold 12px sans-serif;white-space:nowrap}
   </style>
@@ -21,26 +25,49 @@
 <div id="map"></div>
 <script>
   const map=L.map('map',{zoomControl:true}).setView([41.0082,28.9784],10);
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{
-    maxZoom:19,attribution:'© OpenStreetMap'
+  let tileErrors=0;
+  const tileUrl='https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+  const tiles=L.tileLayer(tileUrl,{
+    maxZoom:19,attribution:'© OpenStreetMap',keepBuffer:6,
+    updateWhenIdle:true,updateWhenZooming:false
   }).addTo(map);
+  tiles.on('tileload',()=>{tileErrors=0});
+  tiles.on('tileerror',()=>{tileErrors++});
+  window.addEventListener('online',()=>{tileErrors=0;tiles.redraw()});
   const markers={};
+  const MAX_MARKERS=350;
   let followMode='MANUAL',showAprs=true,showDmr=true,maxAgeMin=60,maxDistanceKm=250,selfPosition=null,lastAutoCenter=0,didInitialSelfCenter=false;
   function stableCenter(lat,lng,zoom){const now=Date.now(),target=L.latLng(lat,lng);if(now-lastAutoCenter<3000&&map.getCenter().distanceTo(target)<150)return;lastAutoCenter=now;map.setView(target,zoom||12,{animate:false});}
   function distanceKm(a,b){const r=6371,dLat=(b[0]-a[0])*Math.PI/180,dLon=(b[1]-a[1])*Math.PI/180;const x=Math.sin(dLat/2)**2+Math.cos(a[0]*Math.PI/180)*Math.cos(b[0]*Math.PI/180)*Math.sin(dLon/2)**2;return 2*r*Math.asin(Math.sqrt(x));}
   function applyFilters(){const now=Date.now();Object.values(markers).forEach(e=>{const age=(now-e.time)/60000;const layerOk=e.type==='DMR'?showDmr:showAprs;const rangeOk=!selfPosition||e.isSelf||distanceKm(selfPosition,[e.lat,e.lng])<=maxDistanceKm;const visible=e.pinned||(layerOk&&rangeOk&&age<=maxAgeMin);if(visible&&!map.hasLayer(e.marker))e.marker.addTo(map);if(!visible&&map.hasLayer(e.marker))map.removeLayer(e.marker);});}
-  function updateStation(name,lat,lng,isSelf,detail,type){
+  function symbolFor(kind){return kind==='CAR'?'&#128663;':(kind==='REPEATER'?'&#128225;':'&#127968;')}
+  function markerIcon(name,kind){return L.divIcon({className:'',html:
+      '<div class="station-symbol '+(kind==='REPEATER'?'repeater':'')+'">'+symbolFor(kind)+'</div><div class="label">'+name+'</div>',
+      iconSize:[100,48],iconAnchor:[17,17]});}
+  function pruneMarkers(){
+    const names=Object.keys(markers);
+    if(names.length<=MAX_MARKERS)return;
+    names.sort((a,b)=>markers[a].time-markers[b].time);
+    let removeCount=names.length-MAX_MARKERS;
+    for(const name of names){
+      if(removeCount<=0)break;
+      const e=markers[name];
+      if(e.pinned||e.isSelf)continue;
+      map.removeLayer(e.marker);delete markers[name];removeCount--;
+    }
+  }
+  function updateStation(name,lat,lng,isSelf,detail,type,kind){
     if(!Number.isFinite(lat)||!Number.isFinite(lng))return;
     type=type||'APRS'; if(isSelf){selfPosition=[lat,lng];if(!didInitialSelfCenter){didInitialSelfCenter=true;stableCenter(lat,lng,12);}}
-    if(markers[name]){const e=markers[name];const moved=e.marker.getLatLng().distanceTo([lat,lng])>5;e.lat=lat;e.lng=lng;e.time=Date.now();e.type=type;if(moved)e.marker.setLatLng([lat,lng]);e.marker.setPopupContent(detail||name);applyFilters();if((followMode==='SELF'&&isSelf)||(followMode==='DMR'&&type==='DMR'))stableCenter(lat,lng,12);return;}
-    const icon=L.divIcon({className:'',html:
-      '<div class="aprs-marker '+(isSelf?'self':(type==='DMR'?'dmr':''))+'"></div><div class="label">'+name+'</div>',
-      iconSize:[80,42],iconAnchor:[11,11]});
+    kind=kind||'AUTO';
+    if(markers[name]){const e=markers[name];const distance=e.marker.getLatLng().distanceTo([lat,lng]);const moved=distance>15;if(kind==='AUTO')kind=moved?'CAR':'HOUSE';e.lat=lat;e.lng=lng;e.time=Date.now();e.type=type;if(moved)e.marker.setLatLng([lat,lng]);if(e.kind!==kind){e.kind=kind;e.marker.setIcon(markerIcon(name,kind));}e.marker.setPopupContent(detail||name);if((followMode==='SELF'&&isSelf)||(followMode==='DMR'&&type==='DMR'))stableCenter(lat,lng,12);return;}
+    if(kind==='AUTO')kind=type==='DMR'?'REPEATER':'HOUSE';
+    const icon=markerIcon(name,kind);
     const marker=L.marker([lat,lng],{icon}).addTo(map);
     marker.bindPopup(detail||name);
     marker.bindTooltip(detail||name,{direction:'top',offset:[0,-12]});
     marker.on('click',()=>{Android.onStationSelected(name);if(followMode==='SELECTED')map.setView([lat,lng],13)});
-    markers[name]={marker,type,time:Date.now(),lat,lng,isSelf,pinned:false};applyFilters();
+    markers[name]={marker,type,kind,time:Date.now(),lat,lng,isSelf,pinned:false};applyFilters();pruneMarkers();
     if((followMode==='SELF'&&isSelf)||(followMode==='DMR'&&type==='DMR'))stableCenter(lat,lng,12);
   }
   function centerMap(lat,lng,zoom){stableCenter(lat,lng,zoom||12)}
