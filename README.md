@@ -39,6 +39,8 @@ Hardware-dependent RF features are experimental and require lawful amateur-radio
 
 API keys, callsigns, APRS-IS passcodes and server tokens are not included. Users must provide their own credentials and comply with the terms of each service.
 
+RepeaterBook integration uses a per-user token and is governed by the concrete request, cache, geographic-scope, backoff, attribution and no-redistribution controls documented in [`docs/REPEATERBOOK_API_POLICY.md`](docs/REPEATERBOOK_API_POLICY.md).
+
 ## Project continuity
 
 The roadmap includes public issue tracking, reproducible builds, contributor documentation and community testing. Contributions from amateur-radio operators, Android developers, mapping specialists and accessibility testers are welcome.
