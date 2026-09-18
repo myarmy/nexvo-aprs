@@ -14,6 +14,18 @@ The project is led by Yusuf Uzun (`TA7TEG`) in Türkiye and is currently under a
 - Encrypted local storage for credentials and API keys
 - Optional Nexvo server API for queued/offline messages
 - Android tablet-oriented interface
+- Multilingual user interface support, including Turkish and English
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/images/station-map.png" alt="Nexvo APRS station map and selected station" width="49%" />
+  <img src="docs/images/tg-dmr.png" alt="Nexvo TG and DMR controls" width="49%" />
+</p>
+<p align="center">
+  <img src="docs/images/main-menu.png" alt="Nexvo main menu" width="49%" />
+  <img src="docs/images/aprs-messaging.png" alt="Nexvo APRS messaging" width="49%" />
+</p>
 
 ## Planned work
 
@@ -43,7 +55,7 @@ RepeaterBook integration uses a per-user token and is governed by the concrete r
 
 ## Project continuity
 
-The roadmap includes public issue tracking, reproducible builds, contributor documentation and community testing. Contributions from amateur-radio operators, Android developers, mapping specialists and accessibility testers are welcome.
+The roadmap includes public issue tracking, reproducible builds, contributor documentation and community testing. Contributions from amateur-radio operators, Android developers, mapping specialists, translators and accessibility testers are welcome.
 
 ## License
 
