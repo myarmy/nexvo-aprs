@@ -38,6 +38,13 @@ The project is led by Yusuf Uzun (`TA7TEG`) in Türkiye and is under active deve
 - Foundation work for future iOS, macOS, and Windows releases
 - macOS-based build, testing, signing, and release workflow for planned Apple-platform applications
 - Disaster and emergency resilience research using on-device GNSS location
+- Morse/CW learning and compatible-device preparation
+
+## Morse/CW learning and compatible-device preparation
+
+Nexvo APRS is preparing a practical Morse/CW assistant that converts ordinary letters and numerals to International Morse Code. The first public scope is an accessible preview and practice interface with a reusable encoder, helping users learn and verify Morse representations.
+
+The project also defines a future transport-adapter boundary for compatible radio or accessory devices. This preparation does not mean that a phone independently transmits RF or satellite traffic. Any transmission requires compatible equipment, a supported network or lawful amateur-radio path, and the appropriate operator authorization.
 
 With the user's permission, Nexvo APRS will use the device's built-in GNSS receiver to obtain and display location coordinates when cellular service is unavailable, subject to satellite visibility and device capability. Sending an emergency message without a cellular network requires compatible satellite or radio hardware and lawful operation.
 
@@ -48,31 +55,3 @@ Hardware-dependent RF features are experimental and require lawful amateur-radio
 Nexvo APRS is community-led, free, and open source. Project progress, goals, and financial activity are shared through Open Collective.
 
 - [Open Collective page](https://opencollective.com/nexvo-aprs)
-- [Project updates](https://opencollective.com/nexvo-aprs/updates)
-- Fiscal host: **Open Collective Europe Foundation**
-
-Contributions support maintenance, testing, accessibility, documentation, multilingual localization, and cross-platform development. Funds are held transparently by Open Collective Europe Foundation.
-
-## Repository structure
-
-- `app/` — Android application
-- `server/` — optional PHP/MySQL backend
-- `gradle/` — Gradle wrapper files
-
-## Building
-
-1. Install JDK 17 and Android SDK Platform 34.
-2. Create `local.properties` with your Android SDK path.
-3. Run `./gradlew assembleDebug` on Linux/macOS or `gradlew.bat assembleDebug` on Windows.
-
-API keys, callsigns, APRS-IS passcodes, and server tokens are not included. Users must provide their own credentials and comply with the terms of each service.
-
-RepeaterBook integration uses a per-user token and is governed by the concrete request, cache, geographic-scope, backoff, attribution, and no-redistribution controls documented in [`docs/REPEATERBOOK_API_POLICY.md`](docs/REPEATERBOOK_API_POLICY.md).
-
-## Project continuity
-
-The roadmap includes public issue tracking, reproducible builds, contributor documentation, and community testing. Contributions from amateur-radio operators, Android developers, mapping specialists, translators, and accessibility testers are welcome.
-
-## License
-
-Licensed under the MIT License. See [LICENSE](LICENSE).
