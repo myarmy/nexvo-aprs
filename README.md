@@ -67,3 +67,12 @@ Nexvo APRS is community-led, free, and open source. Project progress, goals, and
 
 - [Open Collective page](https://opencollective.com/nexvo-aprs)
 - [Support the project](https://opencollective.com/nexvo-aprs/contribute)
+
+
+## Physical Android tablet test evidence
+
+The following screenshots were captured from a working Nexvo APRS test build running on a connected physical Android tablet. They document two separate checks: live TG 91 listening with DMR station selection and MapLibre mapping; and APRS messaging behaviour, including a previously acknowledged delivery plus a separate message handed to APRS-IS while awaiting acknowledgement.
+
+[![Live TG 91 listening, DMR station selection, and MapLibre map view on a physical Android tablet](docs/images/Ekran%20g%C3%B6r%C3%BCnt%C3%BCs%C3%BC%202026-10-02%20175552.png)](docs/images/Ekran%20g%C3%B6r%C3%BCnt%C3%BCs%C3%BC%202026-10-02%20175552.png)
+
+[![APRS messaging test on a physical Android tablet: acknowledged delivery and APRS-IS acknowledgement state](docs/images/ORHAN%20APRS%20MESAJ.png)](docs/images/ORHAN%20APRS%20MESAJ.png)
